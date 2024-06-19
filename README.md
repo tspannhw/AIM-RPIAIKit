@@ -1,6 +1,8 @@
 # AIM-RPIAIKit
 AIM-RPIAIKit
 
+MinIO / S3, Milvus, Slack, Python, Hailo, YOLOv6n, Object Detection, Raspberry Pi AI Kit, Raspberry Pi 5 with 8GB RAM, logi webcam,
+Hailo8L M.2 module, M.2 M-Key Hat, Heat Sink.
 
 
 ## 19-June-2024 == Edge PI Notebook for Semantic Search
