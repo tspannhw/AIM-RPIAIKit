@@ -28,11 +28,19 @@ from timm.data import resolve_data_config
 from timm.data.transforms_factory import create_transform
 from pymilvus import MilvusClient
 import os
+from datetime import datetime
+import os
+import boto3
+from botocore.client import Config
+import uuid
 
 DIMENSION = 512 
 MILVUS_URL = "http://192.168.1.163:19530" 
 COLLECTION_NAME = "pidetections"
 PATH = "/opt/demo/images"
+
+# Time to save
+time_list = [ 0, 5, 10, 20, 30, 40, 50, 59 ]
 
 # -----------------------------------------------------------------------------------------------
 # Connect to Milvus
@@ -93,6 +101,8 @@ extractor = FeatureExtractor("resnet34")
 fields = [
     FieldSchema(name='id', dtype=DataType.INT64, is_primary=True, auto_id=True),
     FieldSchema(name='label', dtype=DataType.VARCHAR, max_length=200),
+    FieldSchema(name='filename', dtype=DataType.VARCHAR, max_length=200),
+    FieldSchema(name='s3path', dtype=DataType.VARCHAR, max_length=200),
     FieldSchema(name='confidence', dtype=DataType.FLOAT),
     FieldSchema(name='vector', dtype=DataType.FLOAT_VECTOR, dim=DIMENSION)
 ]
@@ -116,7 +126,7 @@ class user_app_callback_class(app_callback_class):
         self.new_variable = 42 # new variable example
 
     def new_function(self): # new function example
-        return "Added to Milvus Database "
+        return "Added to Milvus Database"
 
 # Create an instance of the class
 user_data = user_app_callback_class()
@@ -152,6 +162,8 @@ def app_callback(pad, info, user_data):
     detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
     # parse the detections
+    label = ""
+    confidence = 0 
     detection_count = 0
     for detection in detections:
         label = detection.get_label()
@@ -172,45 +184,65 @@ def app_callback(pad, info, user_data):
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         user_data.set_frame(frame)
 
-        # -----------------------------------------------------------------------------
-        # Save Image
-        strfilename = PATH + "/person.jpg"
-        cv2.imwrite(strfilename, frame) 
+        time_now = datetime.now()
+        current_time = int(time_now.strftime("%S"))
 
-        # TODO:   no save, use native cv2 format
-        # -----------------------------------------------------------------------------
-        # Slack
-        try:
-            response = client.chat_postMessage(
-                channel="C06NE1FU6SE",
-                text=(f"Detection: {label} {confidence:.2f}")
-            )
-        except SlackApiError as e:
-            # You will get a SlackApiError if "ok" is False
-            assert e.response["error"]   
+        if current_time in time_list and len(strip(label)) > 3:
+            print(f"Detection count {detection_count} currenttime {current_time}")
+            # -----------------------------------------------------------------------------
+            # Save Image
+            strfilename = PATH + "/person.jpg"
+            cv2.imwrite(strfilename, frame) 
+            randomfilename = '{0}{1}.jpg'.format(label,uuid.uuid4())
+            print(randomfilename)
+   
+            # ---- send to minio
+            # https://github.com/tspannhw/FLaNK-IceIceData
+            # https://www.stackhero.io/en/services/MinIO/documentations/Getting-started/Connect-to-MinIO-from-Python
+            s3 = boto3.resource('s3',
+                    endpoint_url='http://192.168.1.163:9000',
+                    aws_access_key_id='minioadmin',
+                    aws_secret_access_key='minioadmin',
+                    config=Config(signature_version='s3v4'),
+                    region_name='us-east-1')
 
-        try:
-            response = client.files_upload_v2(
-                channel="C06NE1FU6SE",
-                file=strfilename,
-                title=label,
-                initial_comment="Live Camera image ",
-            )
-        except SlackApiError as e:
-            assert e.response["error"]
-        # Slack
-        # -----------------------------------------------------------------------------
-        # Milvus insert
-        try:
-            imageembedding = extractor(strfilename)
-            milvus_client.insert( COLLECTION_NAME, {"vector": imageembedding, "label": label, "confidence": confidence})
-        except Exception as e:
-            print("An error:", e)
-        # -----------------------------------------------------------------------------
+            s3.Bucket('images').upload_file(strfilename,randomfilename)
+
+            s3path = "images/" + randomfilename
+
+            # TODO:   no save, use native cv2 format
+            # -----------------------------------------------------------------------------
+            # Slack
+            try:
+                response = client.chat_postMessage(
+                    channel="C06NE1FU6SE",
+                    text=(f"Detection: {label} {confidence:.2f}")
+                )
+            except SlackApiError as e:
+                # You will get a SlackApiError if "ok" is False
+                assert e.response["error"]   
+
+            try:
+                response = client.files_upload_v2(
+                    channel="C06NE1FU6SE",
+                    file=strfilename,
+                    title=label,
+                    initial_comment="Live Camera image ",
+                )
+            except SlackApiError as e:
+                assert e.response["error"]
+            # Slack
+            # -----------------------------------------------------------------------------
+            # Milvus insert
+            try:
+                imageembedding = extractor(strfilename)
+                milvus_client.insert( COLLECTION_NAME, {"vector": imageembedding, "s3path": s3path, "filename": randomfilename, "label": label, "confidence": confidence})
+            except Exception as e:
+                print("An error:", e)
+            # -----------------------------------------------------------------------------
 
     print(string_to_print)
     return Gst.PadProbeReturn.OK
-
 
 #-----------------------------------------------------------------------------------------------
 # User Gstreamer Application
@@ -251,7 +283,6 @@ class GStreamerDetectionApp(GStreamerApp):
 
         self.create_pipeline()
 
-
     def get_pipeline_string(self):
         if (self.source_type == "rpi"):
             source_element = f"libcamerasrc name=src_0 auto-focus-mode=2 ! "
@@ -273,7 +304,6 @@ class GStreamerDetectionApp(GStreamerApp):
         source_element += QUEUE("queue_src_convert")
         source_element += f" videoconvert n-threads=3 name=src_convert qos=false ! "
         source_element += f"video/x-raw, format={self.network_format}, width={self.network_width}, height={self.network_height}, pixel-aspect-ratio=1/1 ! "
-
 
         pipeline_string = "hailomuxer name=hmux "
         pipeline_string += source_element
